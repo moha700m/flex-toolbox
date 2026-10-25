@@ -23,7 +23,7 @@ struct HTTPTesterView: View {
     @State private var method = "GET"
     @State private var url = "https://httpbin.org/get"
     @State private var headers: [HTTPHeader] = [HTTPHeader(name: "Accept", value: "application/json")]
-    @State private var body = ""
+    @State private var bodyText = ""
     @State private var result: HTTPResult?
     @State private var error: String?
     @State private var busy = false
@@ -48,7 +48,7 @@ struct HTTPTesterView: View {
             }
             if method != "GET" && method != "HEAD" {
                 Section("المحتوى") {
-                    TextEditor(text: $body).font(.mono).frame(minHeight: 80)
+                    TextEditor(text: $bodyText).font(.mono).frame(minHeight: 80)
                 }
             }
             Section {
@@ -86,7 +86,7 @@ struct HTTPTesterView: View {
 
     private func send() async {
         busy = true; error = nil; result = nil
-        let spec = HTTPRequestSpec(method: method, urlString: url, headers: headers, body: body)
+        let spec = HTTPRequestSpec(method: method, urlString: url, headers: headers, body: bodyText)
         do {
             let r = try await HTTPClient.send(spec)
             result = r

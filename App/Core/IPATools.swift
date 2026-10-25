@@ -8,7 +8,7 @@ public struct IPAFileEntry: Identifiable, Equatable {
     public var isDirectory: Bool { path.hasSuffix("/") }
 }
 
-public struct IPABundle: Equatable {
+public struct IPABundle {
     public let workDir: URL
     public let appDir: URL
     public let appName: String
