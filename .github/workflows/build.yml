@@ -1,0 +1,118 @@
+name: Build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode*.app | grep -vi beta | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Pick simulator
+        id: sim
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json,sys
+          d=json.load(sys.stdin)['devices']
+          best=None
+          for rt,devs in d.items():
+            if 'iOS' not in rt: continue
+            for x in devs:
+              if x['name'] in ('iPhone 16 Pro','iPhone 17 Pro','iPhone 16','iPhone 17'):
+                best=x['udid']; break
+            if best: break
+          if not best:
+            for rt,devs in d.items():
+              if 'iOS' not in rt: continue
+              for x in devs:
+                if x['name'].startswith('iPhone') and 'Pro' in x['name']:
+                  best=x['udid']; break
+              if best: break
+          print(best or '')
+          ")
+          echo "udid=$UDID" >> $GITHUB_OUTPUT
+          xcrun simctl list devices | grep "$UDID"
+      - name: Unit tests
+        run: |
+          set +e
+          xcodebuild test -project FlexToolbox.xcodeproj -scheme FlexToolbox \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO > test.log 2>&1
+          rc=$?
+          grep -E "error:|Test Case.*(passed|failed)|Executed|TEST (SUCCEEDED|FAILED)" test.log | tail -80
+          exit $rc
+      - name: Simulator screenshots
+        run: |
+          set -x
+          UDID=${{ steps.sim.outputs.udid }}
+          xcodebuild build -project FlexToolbox.xcodeproj -scheme FlexToolbox -configuration Debug \
+            -destination "id=$UDID" -derivedDataPath build/sim CODE_SIGNING_ALLOWED=NO -quiet
+          APP=$(find build/sim/Build/Products -name "FlexToolbox.app" -path "*iphonesimulator*" | head -1)
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          mkdir -p shots
+          shot() { local name=$1; shift
+            xcrun simctl terminate "$UDID" com.moha700m.flextoolbox || true
+            xcrun simctl launch "$UDID" com.moha700m.flextoolbox "$@"
+            sleep 5
+            xcrun simctl io "$UDID" screenshot "shots/$name.png"
+          }
+          shot onboard
+          shot home -seenOnboard YES
+          shot ipa -seenOnboard YES -screen ipa
+          shot files -seenOnboard YES -screen files
+          shot tools -seenOnboard YES -screen tools
+          shot about -seenOnboard YES -screen about
+          xcrun simctl ui "$UDID" appearance dark
+          shot home-dark -seenOnboard YES
+          xcrun simctl ui "$UDID" appearance light
+          sips -g pixelWidth -g pixelHeight shots/*.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: |
+            shots/
+            test.log
+      - name: Build unsigned IPA
+        run: |
+          set -o pipefail
+          xcodebuild archive -project FlexToolbox.xcodeproj -scheme FlexToolbox -configuration Release \
+            -destination "generic/platform=iOS" -archivePath build/FlexToolbox.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" | tail -40
+          mkdir -p Payload
+          cp -R build/FlexToolbox.xcarchive/Products/Applications/FlexToolbox.app Payload/
+          P=Payload/FlexToolbox.app/Info.plist
+          plutil -p "$P"
+          plutil -extract UILaunchScreen xml1 -o - "$P" >/dev/null || { echo "::error::UILaunchScreen missing"; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' $P)" = "LaunchScreen" || { echo "::error::UILaunchStoryboardName missing"; exit 1; }
+          test -d Payload/FlexToolbox.app/LaunchScreen.storyboardc || { echo "::error::LaunchScreen.storyboardc missing"; exit 1; }
+          FAM=$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' $P | tr -d ' \n')
+          echo "UIDeviceFamily=$FAM"; [ "$FAM" = "Array{1}" ] || { echo "::error::UIDeviceFamily not [1]"; exit 1; }
+          zip -qry FlexToolbox.ipa Payload
+          ls -la FlexToolbox.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FlexToolbox-ipa
+          path: FlexToolbox.ipa
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" FlexToolbox.ipa shots/*.png \
+            --title "عدّة فلكس $TAG (unsigned)" \
+            --notes "Unsigned IPA for ESign. Commit ${{ github.sha }}. Sandbox-only toolbox — cannot inspect other installed apps."
